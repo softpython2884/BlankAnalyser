@@ -1,0 +1,43 @@
+# ===========================================================================
+#  BlankAnalyser - .gitignore
+#
+#  RÈGLE DE SÉCURITÉ N°1 : on ne commite JAMAIS d'échantillon suspect, ni de
+#  binaire téléchargé, ni de rapport contenant des chemins/infos personnels.
+#  Les dossiers de travail sont donc entièrement ignorés (sauf leur .gitkeep).
+# ===========================================================================
+
+# Échantillons mis en quarantaine — NE JAMAIS versionner un fichier douteux
+quarantine/*
+!quarantine/.gitkeep
+
+# Rapports générés (peuvent contenir des chemins et noms personnels)
+reports/*
+!reports/.gitkeep
+
+# Configurations .wsb générées à chaque lancement
+runs/*
+!runs/.gitkeep
+
+# Outils et runtimes téléchargés (Sysmon, Procmon, redistribuables)
+cache/tools/*
+!cache/tools/.gitkeep
+cache/redist/*
+!cache/redist/.gitkeep
+
+# Fichiers .wsb éparpillés
+*.wsb
+
+# Détritus Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Éditeurs
+.vs/
+.vscode/
+*.suo
+*~
+
+# Logs éventuels
+*.log

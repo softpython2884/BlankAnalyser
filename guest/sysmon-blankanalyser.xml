@@ -1,0 +1,155 @@
+<!--
+  BlankAnalyser - configuration Sysmon pour analyse en sandbox.
+
+  Difference avec une config de production (type SwiftOnSecurity, ~1500 lignes) :
+  dans une sandbox le bruit de fond est quasi nul, donc on capture LARGE et on
+  filtre a la lecture. On exclut seulement ce qui est a la fois tres volumineux
+  et sans valeur (ImageLoad, ProcessTerminate) ou clairement Windows lui-meme.
+
+  FileDeleteDetected (26) est utilise a la place de FileDelete (23) : on veut
+  savoir QUE le fichier a ete supprime, pas en archiver une copie (ce qui
+  remplirait le disque de la sandbox en cas de wiper).
+-->
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+
+  <EventFiltering>
+
+    <!-- 1 : creation de processus - TOUT (c'est le squelette du rapport) -->
+    <RuleGroup name="proc-create" groupRelation="or">
+      <ProcessCreate onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 2 : horodatage falsifie (timestomping) -->
+    <RuleGroup name="filetime" groupRelation="or">
+      <FileCreateTime onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 3 : connexions reseau - TOUT, en excluant le bruit Windows -->
+    <RuleGroup name="net" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+        <Image condition="is">C:\Windows\System32\backgroundTaskHost.exe</Image>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- 5 : fin de processus - trop bruyant, sans interet ici -->
+    <RuleGroup name="proc-term" groupRelation="or">
+      <ProcessTerminate onmatch="include" />
+    </RuleGroup>
+
+    <!-- 6 : chargement de driver = rootkit potentiel. TOUT. -->
+    <RuleGroup name="driver" groupRelation="or">
+      <DriverLoad onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 7 : chargement de DLL - desactive (des milliers d'evenements) -->
+    <RuleGroup name="imageload" groupRelation="or">
+      <ImageLoad onmatch="include" />
+    </RuleGroup>
+
+    <!-- 8 : injection de thread distant -->
+    <RuleGroup name="remotethread" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 9 : acces disque brut = signature du wiper qui detruit une partition -->
+    <RuleGroup name="rawaccess" groupRelation="or">
+      <RawAccessRead onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 10 : ouverture de handle sur un autre processus (vol de credentials) -->
+    <RuleGroup name="procaccess" groupRelation="or">
+      <ProcessAccess onmatch="exclude">
+        <SourceImage condition="is">C:\Windows\System32\svchost.exe</SourceImage>
+        <SourceImage condition="is">C:\Windows\System32\wbem\WmiPrvSE.exe</SourceImage>
+        <SourceImage condition="contains">Sysmon</SourceImage>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- 11 : creation de fichier -->
+    <RuleGroup name="filecreate" groupRelation="or">
+      <FileCreate onmatch="exclude">
+        <TargetFilename condition="begin with">C:\Windows\Prefetch</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\ServiceProfiles</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\config</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Logs</TargetFilename>
+        <TargetFilename condition="contains">\Microsoft\Windows\WER\</TargetFilename>
+        <TargetFilename condition="contains">\INetCache\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- 12/13/14 : registre. On cible la persistance et le detournement. -->
+    <RuleGroup name="registry" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Explorer\Shell Folders</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Winlogon</TargetObject>
+        <TargetObject condition="contains">\Image File Execution Options\</TargetObject>
+        <TargetObject condition="contains">\CurrentControlSet\Services\</TargetObject>
+        <TargetObject condition="contains">\Policies\Explorer\Run</TargetObject>
+        <TargetObject condition="contains">\Classes\exefile\shell</TargetObject>
+        <TargetObject condition="contains">\Windows Defender</TargetObject>
+        <TargetObject condition="contains">\Internet Settings\ProxyServer</TargetObject>
+        <TargetObject condition="contains">\Explorer\Advanced\Hidden</TargetObject>
+        <TargetObject condition="end with">\ShellFolders\Startup</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- 15 : flux ADS (fichier telecharge ecrit sur disque) -->
+    <RuleGroup name="ads" groupRelation="or">
+      <FileCreateStreamHash onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 17/18 : named pipes (canal C2 / mouvement lateral) -->
+    <RuleGroup name="pipes" groupRelation="or">
+      <PipeEvent onmatch="exclude">
+        <PipeName condition="contains">Anonymous</PipeName>
+        <PipeName condition="begin with">\crashpad</PipeName>
+      </PipeEvent>
+    </RuleGroup>
+
+    <!-- 19/20/21 : persistance WMI (tres furtif) -->
+    <RuleGroup name="wmi" groupRelation="or">
+      <WmiEvent onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 22 : requetes DNS = la lecture la plus parlante de "qui il appelle" -->
+    <RuleGroup name="dns" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.windowsupdate.com</QueryName>
+        <QueryName condition="end with">.msftconnecttest.com</QueryName>
+        <QueryName condition="end with">.msftncsi.com</QueryName>
+        <QueryName condition="end with">.windows.com</QueryName>
+        <QueryName condition="end with">.bing.com</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+    <!-- 24 : acces au presse-papier (clipper crypto) -->
+    <RuleGroup name="clipboard" groupRelation="or">
+      <ClipboardChange onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 25 : process hollowing / tampering -->
+    <RuleGroup name="tampering" groupRelation="or">
+      <ProcessTampering onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 26 : suppression de fichier detectee (sans archivage) -->
+    <RuleGroup name="filedelete" groupRelation="or">
+      <FileDeleteDetected onmatch="exclude">
+        <TargetFilename condition="contains">\Temp\</TargetFilename>
+        <TargetFilename condition="contains">\INetCache\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Prefetch</TargetFilename>
+      </FileDeleteDetected>
+    </RuleGroup>
+
+    <!-- 27/28 : blocage d'executable (si Defender bloque dans la sandbox) -->
+    <RuleGroup name="blocked" groupRelation="or">
+      <FileBlockExecutable onmatch="exclude" />
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>

@@ -1,0 +1,49 @@
+name: Lint PowerShell
+
+# Analyse statique des scripts à chaque push et pull request.
+# Tourne sur les runners GitHub (Windows) — rien à installer côté contributeur.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  psscriptanalyzer:
+    name: PSScriptAnalyzer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Vérifier que chaque script parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errs)
+            if ($errs) {
+              $failed = $true
+              Write-Host "::error file=$($_.FullName)::$($errs.Count) erreur(s) de syntaxe"
+              $errs | ForEach-Object { Write-Host "  L$($_.Extent.StartLineNumber): $($_.Message)" }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: PSScriptAnalyzer (avertissements)
+        shell: pwsh
+        run: |
+          # Les avertissements ne bloquent pas le build : ils s'affichent pour info.
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Warning,Error -ExcludeRule PSAvoidUsingWriteHost,PSUseShouldProcessForStateChangingFunctions
+          if ($results) {
+            $results | Format-Table -AutoSize
+            $errors = $results | Where-Object Severity -eq 'Error'
+            if ($errors) { Write-Host "::error::PSScriptAnalyzer a trouvé des erreurs"; exit 1 }
+          } else {
+            Write-Host "Aucun problème signalé."
+          }

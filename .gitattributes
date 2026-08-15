@@ -1,0 +1,19 @@
+# Normalisation des fins de ligne.
+# Les scripts PowerShell / batch sont Windows-only : on force CRLF.
+# IMPORTANT : Menu.ps1 est encodé UTF-8 AVEC BOM (sinon PowerShell 5.1 casse
+# les accents). Git ne touche pas au BOM lors de la normalisation EOL, donc
+# le marquer "text" est sûr.
+
+* text=auto
+
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.xml  text eol=crlf
+
+*.md   text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
