@@ -66,14 +66,17 @@ try {
 #    epaissir la liste (certains malwares comptent les processus, ou cherchent
 #    l'absence de navigateur / suite bureautique).
 # ---------------------------------------------------------------------------
-try {
-    # notepad invisible, juste pour exister dans la liste des processus
-    1..2 | ForEach-Object {
-        Start-Process notepad -WindowStyle Minimized -ErrorAction SilentlyContinue
+# NB : on lance seulement des programmes qui EXISTENT vraiment dans la sandbox.
+# notepad.exe est absent de Windows Sandbox -> on le teste avant, sinon
+# Start-Process leve une erreur terminale (que -ErrorAction n'attrape pas).
+foreach ($exe in 'notepad.exe','mspaint.exe','calc.exe') {
+    $path = Join-Path $env:SystemRoot "System32\$exe"
+    if (Test-Path $path) {
+        try { Start-Process $path -WindowStyle Minimized } catch { }
     }
-    Start-Process explorer -ArgumentList ([Environment]::GetFolderPath('MyDocuments')) -ErrorAction SilentlyContinue
-    Ok "Processus utilisateur d'ambiance lances."
-} catch { }
+}
+try { Start-Process explorer.exe -ArgumentList ([Environment]::GetFolderPath('MyDocuments')) } catch { }
+Ok "Processus utilisateur d'ambiance lances (ceux disponibles)."
 
 # ---------------------------------------------------------------------------
 # 3. Signaux de temps de fonctionnement / interaction : certains echantillons

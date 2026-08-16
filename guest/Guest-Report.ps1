@@ -29,6 +29,16 @@ $start   = if ($session) { [datetime]$session.Start } else { (Get-Date).AddHours
 $target  = if ($session) { $session.Target } else { '(inconnu)' }
 $workDir = if ($session -and $session.WorkDir) { $session.WorkDir } else { "$Work\target" }
 
+# Le logiciel teste peut tourner depuis le dossier de deploiement (C:\Work\target)
+# OU depuis C:\g (ou EXTRAIRE.cmd extrait les gros zips). On considere les deux
+# comme "la cible" : sinon un jeu extrait avec EXTRAIRE n'est jamais reconnu.
+$targetRoots = @($workDir, 'C:\g') | Where-Object { $_ }
+function Under-Target([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return $false }
+    foreach ($tr in $targetRoots) { if ($p -like "$tr*") { return $true } }
+    return $false
+}
+
 Write-Host "`n[..] Collecte des evenements depuis $start ..." -ForegroundColor Cyan
 
 # --- Chargement des evenements ---------------------------------------------
@@ -156,7 +166,7 @@ if ($mode -eq 'sysmon') {
     $proc1 = @($ev | Where-Object Id -eq 1)
     $targetGuids = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($e in $proc1) {
-        if (([string](& $get $e 'Image')) -like "$workDir*") {
+        if (Under-Target ([string](& $get $e 'Image'))) {
             [void]$targetGuids.Add([string](& $get $e 'ProcessGuid'))
         }
     }
@@ -267,7 +277,7 @@ if ($mode -eq 'sysmon') {
     $created = @($ev | Where-Object Id -eq 11 | Where-Object { InTree $_ })
     $outside = @($created | Where-Object {
         $t = & $get $_ 'TargetFilename'
-        $t -and $t -notlike "$workDir*" -and $t -notmatch '(?i)\\Temp\\|\\AppData\\Local\\Temp\\'
+        $t -and -not (Under-Target $t) -and $t -notmatch '(?i)\\Temp\\|\\AppData\\Local\\Temp\\'
     })
     $deleted = @($ev | Where-Object Id -eq 26 | Where-Object { InTree $_ })
 
@@ -360,7 +370,7 @@ else {
     W ""
 
     $targetRan = [bool]@($ev | Where-Object type -eq 'process' |
-        Where-Object { ([string]$_.image) -like "$workDir*" }).Count
+        Where-Object { Under-Target ([string]$_.image) }).Count
 
     $p = @($ev | Where-Object type -eq 'process' |
         Where-Object { -not (Test-Noise $_.image) -and -not (Test-Harness "$($_.image) $($_.commandline)") })
@@ -403,7 +413,7 @@ else {
             "Vers : $(($n | Select-Object -ExpandProperty remote -Unique) -join ', ')"
     }
 
-    $outside = @($f | Where-Object { $_.path -notlike "$workDir*" -and $_.path -notmatch '(?i)\\Temp\\' })
+    $outside = @($f | Where-Object { -not (Under-Target ([string]$_.path)) -and $_.path -notmatch '(?i)\\Temp\\' })
     W "## Fichiers"
     W ""
     W "- Evenements fichiers : **$(N $f)** (dont **$(N $outside)** hors du dossier du jeu)"
@@ -458,9 +468,10 @@ $head.Add("> $crit critique(s), $high haute(s), $med moyenne(s).")
 $head.Add("")
 if (-not $targetRan) {
     $head.Add("> [!] **Aucun processus n'a ete lance depuis le dossier du jeu**")
-    $head.Add("> (``$workDir``). Tu as tres probablement genere ce rapport **avant**")
-    $head.Add("> de lancer le jeu. Les evenements ci-dessous ne sont donc PAS le jeu :")
-    $head.Add("> lance-le, utilise-le quelques minutes, PUIS relance RAPPORT.cmd.")
+    $head.Add("> (ni ``$workDir`` ni ``C:\g``). Soit tu as genere ce rapport **avant**")
+    $head.Add("> de lancer le jeu, soit tu l'as lance depuis un AUTRE dossier.")
+    $head.Add("> Lance l'executable depuis C:\g (ou C:\Work\target), utilise-le,")
+    $head.Add("> puis relance RAPPORT.cmd.")
     $head.Add("")
 }
 
