@@ -49,28 +49,42 @@ $items = @(Get-ChildItem $In -Force -ErrorAction SilentlyContinue | Where-Object
 if (-not $items) {
     Warn "Aucun fichier dans C:\BA\in. La quarantaine est-elle vide ?"
 } else {
+    $big = @()
     foreach ($it in $items) {
+        # Les gros fichiers (>150 Mo) ne sont PAS copies : copie lente sur le
+        # partage, et double la place disque. On les laisse dans C:\BA\in ;
+        # EXTRAIRE.cmd sait les lire directement de la.
+        if (-not $it.PSIsContainer -and $it.Length -gt 150MB) {
+            $big += $it.Name
+            Write-Host "    (garde dans C:\BA\in) $($it.Name) [$([math]::Round($it.Length/1MB)) Mo]" -ForegroundColor DarkGray
+            continue
+        }
         Write-Host "    -> $($it.Name)" -ForegroundColor Gray
         try { Copy-Item -LiteralPath $it.FullName -Destination $targetDir -Recurse -Force -ErrorAction Stop }
         catch { Warn "Copie de $($it.Name) impossible : $($_.Exception.Message)" }
     }
-    Ok "$($items.Count) element(s) copie(s) BRUTS dans C:\Work\target."
-    Ok "Decompile le .zip et lance l'executable directement depuis la."
+    Ok "Fichiers dans C:\Work\target (decompile / lance depuis la)."
+    if ($big) {
+        Warn "Gros fichier(s) laisse(s) dans C:\BA\in : $($big -join ', ')"
+        Warn "-> utilise EXTRAIRE.cmd (bureau) pour les extraire proprement."
+    }
 }
 
 # --- 2. Raccourcis sur le bureau (EN DEUXIEME, toujours) --------------------
 Step "Raccourcis sur le bureau"
 $desktop = [Environment]::GetFolderPath('Desktop')
+function Shortcut($name, $script) {
+    @"
+@echo off
+powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\$script"
+"@ | Set-Content "$desktop\$name" -Encoding ASCII
+}
 try {
-    @"
-@echo off
-powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-Report.ps1"
-"@ | Set-Content "$desktop\RAPPORT.cmd" -Encoding ASCII
-    @"
-@echo off
-powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-View.ps1"
-"@ | Set-Content "$desktop\VOIR-UN-FICHIER.cmd" -Encoding ASCII
-    Ok "RAPPORT.cmd et VOIR-UN-FICHIER.cmd sur le bureau."
+    Shortcut 'RAPPORT.cmd'         'Guest-Report.ps1'
+    Shortcut 'EXTRAIRE.cmd'        'Guest-Extract.ps1'
+    Shortcut 'VOIR-UN-FICHIER.cmd' 'Guest-View.ps1'
+    Shortcut 'ETAT.cmd'            'Guest-Status.ps1'
+    Ok "Bureau : RAPPORT / EXTRAIRE / VOIR-UN-FICHIER / ETAT"
 } catch { Warn "Creation des raccourcis impossible : $($_.Exception.Message)" }
 
 # --- 3. Camouflage (mode furtif) -------------------------------------------
@@ -170,21 +184,24 @@ Write-Host @"
   PRET.  Surveillance : $monitorMode
 ================================================================
 
-  Tes fichiers sont dans  C:\Work\target  (bruts, tels quels).
+  Tes petits fichiers sont dans  C:\Work\target . Les gros zips
+  restent dans  C:\BA\in  (voir plus bas).
 
   ORDRE IMPORTANT -- le rapport n'a de sens qu'APRES avoir joue :
 
-  1) Va dans  C:\Work\target . Decompile le .zip si besoin
-     (clic droit > Extraire tout), puis lance l'executable.
+  1) EXTRAIRE le jeu : double-clique  EXTRAIRE.cmd  sur le bureau.
+     Il extrait proprement (vers C:\g), verifie la place disque et
+     dit exactement si un fichier echoue. NE decompresse PAS un gros
+     zip avec le clic-droit Windows : il s'arrete en silence.
 
-  2) UTILISE-LE quelques minutes : menus, options, sauvegarde.
-     Beaucoup de charges n'agissent qu'apres une interaction.
+  2) Lance l'executable extrait, et UTILISE-LE quelques minutes.
 
-  3) SEULEMENT ENSUITE, double-clique  RAPPORT.cmd  sur le bureau.
-     (Tu peux jouer plus et relancer RAPPORT.cmd autant de fois
-      que tu veux : l'observation reste active.)
+  3) SEULEMENT ENSUITE, double-clique  RAPPORT.cmd .
+     (Rejouable autant de fois que tu veux : l'observation reste active.)
 
-  Lire un fichier (pas de Notepad ici) : VOIR-UN-FICHIER.cmd
+  Autres outils du bureau :
+    ETAT.cmd            -> VC++ installe ? disque/RAM ? journal ?
+    VOIR-UN-FICHIER.cmd -> lire un fichier (pas de Notepad ici)
 
   Le rapport sort dans C:\BA\out\ = ton dossier reports\ sur l'hote.
 ================================================================
