@@ -147,9 +147,10 @@
     </RuleGroup>
 
     <!-- 27/28 : blocage d'executable (si Defender bloque dans la sandbox) -->
-    <RuleGroup name="blocked" groupRelation="or">
-      <FileBlockExecutable onmatch="exclude" />
-    </RuleGroup>
+    <!-- PAS de FileBlockExecutable / FileBlockShredding ici : ce sont des
+         fonctions de PREVENTION ACTIVE. "onmatch=exclude" avec une liste vide
+         bloquerait la creation de TOUS les .exe/.dll -> extraction et jeu
+         cassES. BlankAnalyser OBSERVE, il ne bloque jamais. Ne pas remettre. -->
 
   </EventFiltering>
 </Sysmon>

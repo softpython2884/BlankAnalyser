@@ -325,9 +325,10 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 6 / 8 / 10 / 24 / 25 : bas niveau ----------------------------------
-    # Event 6 (DriverLoad) n'a PAS de ProcessGuid : on ne peut pas l'attribuer a
-    # l'arbre du jeu. On se rabat sur l'exclusion du harnais (SysmonDrv).
-    $drv   = @($ev | Where-Object Id -eq 6  | Where-Object { -not (Skip-Sys $_) })
+    # Event 6 (DriverLoad) n'a PAS de ProcessGuid : impossible de l'attribuer a
+    # l'arbre du jeu. On exclut le harnais (SysmonDrv) ET, si le jeu n'a pas
+    # tourne, on ignore tout (ce ne serait que du bruit de demarrage Windows).
+    $drv   = if ($targetRan) { @($ev | Where-Object Id -eq 6 | Where-Object { -not (Skip-Sys $_) }) } else { @() }
     $crt   = @($ev | Where-Object Id -eq 8  | Where-Object { InTree $_ })
     $lsass = @($ev | Where-Object { $_.Id -eq 10 -and (& $get $_ 'TargetImage') -match '(?i)lsass\.exe' } | Where-Object { InTree $_ })
     $tamp  = @($ev | Where-Object Id -eq 25 | Where-Object { InTree $_ })
