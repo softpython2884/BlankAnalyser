@@ -1,7 +1,11 @@
 <#
     BlankAnalyser - lance automatiquement au demarrage de la sandbox.
-    Prepare l'environnement, installe les dependances depuis le cache, arme
-    la surveillance, puis rend la main.
+
+    Ordre pense pour la ROBUSTESSE : on met d'abord les fichiers a tester et les
+    raccourcis en place (etapes rapides et sures), PUIS on arme la surveillance,
+    PUIS on installe les runtimes (etape qui peut trainer). Ainsi, meme si une
+    installation bloque, l'essentiel est deja pret. Un journal est ecrit sur
+    l'hote (reports\_bootstrap.log) pour diagnostiquer tout blocage.
 #>
 param(
     [string]$TargetName,
@@ -19,6 +23,11 @@ function Step($m) { Write-Host "`n[.] $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
 
+New-Item -ItemType Directory -Path $Work -Force | Out-Null
+
+# Journal sur l'hote : si le bootstrap se fige, on saura ou.
+try { Start-Transcript -Path (Join-Path $Out '_bootstrap.log') -Force -ErrorAction Stop | Out-Null } catch { }
+
 Clear-Host
 Write-Host @"
 ================================================================
@@ -29,180 +38,160 @@ Write-Host @"
 ================================================================
 "@ -ForegroundColor Cyan
 
-New-Item -ItemType Directory -Path $Work -Force | Out-Null
-
-# --- 1. Dependances depuis le cache (zero telechargement) -------------------
-Step "Installation des dependances depuis le cache local"
-$redist = Get-ChildItem "$Cache\redist" -Filter *.exe -ErrorAction SilentlyContinue
-if (-not $redist) {
-    Warn "cache\redist\ est vide - aucune dependance a installer."
-    Warn "Si le jeu se plaint d'un VCRUNTIME140.dll ou MSVCP140.dll manquant,"
-    Warn "mets vc_redist.x64.exe dans cache\redist\ sur l'hote et relance."
+# --- 1. Deploiement des fichiers a tester (EN PREMIER, toujours) ------------
+#  On copie TOUT le contenu de la quarantaine, BRUT, sans rien extraire.
+#  Tu retrouves tes fichiers tels quels dans C:\Work\target et tu decompiles
+#  / lances ce que tu veux toi-meme.
+Step "Mise en place de tes fichiers dans C:\Work\target"
+$targetDir = Join-Path $Work 'target'
+New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+$items = @(Get-ChildItem $In -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '.gitkeep' })
+if (-not $items) {
+    Warn "Aucun fichier dans C:\BA\in. La quarantaine est-elle vide ?"
 } else {
-    foreach ($r in $redist) {
-        Write-Host "    -> $($r.Name)" -ForegroundColor Gray
-        try {
-            $p = Start-Process -FilePath $r.FullName -ArgumentList '/install','/quiet','/norestart' `
-                               -Wait -PassThru -ErrorAction Stop
-            if ($p.ExitCode -in 0, 1638, 3010) { Ok "$($r.Name) : ok (code $($p.ExitCode))" }
-            else { Warn "$($r.Name) : code $($p.ExitCode)" }
-        } catch { Warn "$($r.Name) : $($_.Exception.Message)" }
+    foreach ($it in $items) {
+        Write-Host "    -> $($it.Name)" -ForegroundColor Gray
+        try { Copy-Item -LiteralPath $it.FullName -Destination $targetDir -Recurse -Force -ErrorAction Stop }
+        catch { Warn "Copie de $($it.Name) impossible : $($_.Exception.Message)" }
     }
+    Ok "$($items.Count) element(s) copie(s) BRUTS dans C:\Work\target."
+    Ok "Decompile le .zip et lance l'executable directement depuis la."
 }
 
-# --- 1b. Couche de camouflage (mode furtif) --------------------------------
-#  IMPORTANT : elle tourne AVANT l'armement de l'observateur, pour que les faux
-#  fichiers/processus qu'elle cree ne polluent pas le rapport comportemental.
+# --- 2. Raccourcis sur le bureau (EN DEUXIEME, toujours) --------------------
+Step "Raccourcis sur le bureau"
+$desktop = [Environment]::GetFolderPath('Desktop')
+try {
+    @"
+@echo off
+powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-Report.ps1"
+"@ | Set-Content "$desktop\RAPPORT.cmd" -Encoding ASCII
+    @"
+@echo off
+powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-View.ps1"
+"@ | Set-Content "$desktop\VOIR-UN-FICHIER.cmd" -Encoding ASCII
+    Ok "RAPPORT.cmd et VOIR-UN-FICHIER.cmd sur le bureau."
+} catch { Warn "Creation des raccourcis impossible : $($_.Exception.Message)" }
+
+# --- 3. Camouflage (mode furtif) -------------------------------------------
 if ($Stealth) {
     Step "Camouflage du bac a sable (mode furtif)"
     $realism = Join-Path $Kit 'Guest-Realism.ps1'
     if (Test-Path $realism) {
         try { & $realism } catch { Warn "Camouflage partiel : $($_.Exception.Message)" }
     } else { Warn "Guest-Realism.ps1 introuvable dans le kit." }
-    Warn "RAPPEL : le camouflage est partiel par conception. Un echantillon qui"
-    Warn "teste le processeur ou le nom d'utilisateur verra quand meme une VM."
-    Warn "Voir docs/ANTI-VM.md. Ne prends jamais un rapport propre pour une preuve."
+    Warn "RAPPEL : camouflage PARTIEL. Le processeur virtualise et le compte"
+    Warn "WDAGUtilityAccount trahissent toujours la VM (docs/ANTI-VM.md)."
 }
 
-# --- 2. Surveillance --------------------------------------------------------
+# --- 4. Surveillance --------------------------------------------------------
 Step "Armement de la surveillance"
 $monitorMode = 'none'
 $sysmon = Join-Path $Cache 'tools\Sysmon64.exe'
 $cfg    = Join-Path $Kit 'sysmon-blankanalyser.xml'
-
 $sysmonBin = $null
+
 if ((Test-Path $sysmon) -and (Test-Path $cfg)) {
-    # Sysmon a besoin d'ecrire son driver : on le copie hors du montage lecture seule.
-    # En mode furtif on renomme le binaire : le nom du SERVICE et du PROCESSUS
-    # derive du nom de l'executable, donc "Sysmon64.exe" -> un service et un
-    # processus qui ne s'appellent plus "Sysmon" (le tell le plus courant).
-    # NB : le DRIVER reste nomme "SysmonDrv" (non renommable en ligne de commande) ;
-    # c'est une limite documentee dans docs/ANTI-VM.md.
-    $binName = if ($Stealth) { 'WinHostSvc.exe' } else { 'Sysmon64.exe' }
-    $svcName = [System.IO.Path]::GetFileNameWithoutExtension($binName)
-    $local = Join-Path $Work $binName
-    Copy-Item $sysmon $local -Force
-    $sysmonBin = $local
-    $r = & $local -accepteula -i $cfg 2>&1 | Out-String
-    Start-Sleep -Seconds 2
-    if (Get-Service -Name $svcName, 'Sysmon64', 'Sysmon' -ErrorAction SilentlyContinue) {
-        $monitorMode = 'sysmon'
-        if ($Stealth) { Ok "Observation active (service masque sous '$svcName')." }
-        else { Ok "Sysmon actif - journalisation structuree du comportement." }
-    } else {
-        Warn "L'observateur n'a pas demarre. Sortie :"
-        Write-Host $r -ForegroundColor DarkGray
-    }
+    # Sysmon ecrit un driver : on le copie hors du montage lecture seule.
+    # En mode furtif on renomme le binaire -> service et processus non nommes
+    # "Sysmon" (le driver reste "SysmonDrv", cf docs/ANTI-VM.md).
+    try {
+        $binName = if ($Stealth) { 'WinHostSvc.exe' } else { 'Sysmon64.exe' }
+        $svcName = [System.IO.Path]::GetFileNameWithoutExtension($binName)
+        $local = Join-Path $Work $binName
+        Copy-Item $sysmon $local -Force
+        $sysmonBin = $local
+        $r = & $local -accepteula -i $cfg 2>&1 | Out-String
+        Start-Sleep -Seconds 2
+        if (Get-Service -Name $svcName, 'Sysmon64', 'Sysmon' -ErrorAction SilentlyContinue) {
+            $monitorMode = 'sysmon'
+            if ($Stealth) { Ok "Observation active (service masque sous '$svcName')." }
+            else { Ok "Sysmon actif - journalisation structuree du comportement." }
+        } else {
+            Warn "L'observateur n'a pas demarre. Sortie :"
+            Write-Host $r -ForegroundColor DarkGray
+        }
+    } catch { Warn "Armement Sysmon impossible : $($_.Exception.Message)" }
 }
 else { Warn "Sysmon absent de cache\tools\ (lance Setup-Host.ps1 sur l'hote)." }
 
 if ($monitorMode -eq 'none') {
     Warn "Bascule sur le moniteur de secours (PowerShell pur, sans driver)."
-    Start-Process powershell.exe -ArgumentList @(
-        '-ExecutionPolicy','Bypass','-WindowStyle','Hidden',
-        '-File',"$Kit\Guest-FallbackMonitor.ps1"
-    )
-    Start-Sleep -Seconds 2
-    if (Test-Path "$Work\_fallback.jsonl") { $monitorMode = 'fallback'; Ok "Moniteur de secours actif." }
-    else { Warn "Moniteur de secours en cours de demarrage..."; $monitorMode = 'fallback' }
+    try {
+        Start-Process powershell.exe -ArgumentList @(
+            '-ExecutionPolicy','Bypass','-WindowStyle','Hidden',
+            '-File',"$Kit\Guest-FallbackMonitor.ps1"
+        )
+        Start-Sleep -Seconds 2
+        $monitorMode = 'fallback'
+        Ok "Moniteur de secours actif."
+    } catch { Warn "Moniteur de secours impossible : $($_.Exception.Message)" }
 }
 
-# --- 3. Mise en place de la cible -------------------------------------------
-Step "Deploiement de la cible"
-$src = Join-Path $In $TargetName
-if (-not (Test-Path $src)) {
-    Warn "Cible '$TargetName' introuvable dans C:\BA\in. Contenu disponible :"
-    Get-ChildItem $In -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "      $($_.Name)" }
+# --- 5. Runtimes depuis le cache (EN DERNIER : peut trainer) ----------------
+#  Avec un DELAI MAXIMAL par installeur : un runtime qui bloque ne doit JAMAIS
+#  geler toute la sandbox (c'etait le bug du "rien ne se passe").
+Step "Installation des runtimes (VC++...) depuis le cache"
+$redist = @(Get-ChildItem "$Cache\redist" -Filter *.exe -ErrorAction SilentlyContinue)
+if (-not $redist) {
+    Warn "cache\redist\ vide. Si un jeu reclame VCRUNTIME140.dll / MSVCP140.dll,"
+    Warn "relance Setup-Host.ps1 sur l'hote (il telecharge le VC++ tout seul)."
 } else {
-    $item = Get-Item $src
-    if ($item.PSIsContainer) {
-        Copy-Item $src "$Work\target" -Recurse -Force
-        Ok "Dossier copie dans C:\Work\target"
-    }
-    elseif ($item.Extension -eq '.zip') {
-        # .NET d'abord (rapide, econome en RAM), repli sur Expand-Archive.
-        $extracted = $false
+    foreach ($rd in $redist) {
+        Write-Host "    -> $($rd.Name)" -ForegroundColor Gray
         try {
-            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($src, "$Work\target")
-            $extracted = $true
-        } catch {
-            try {
-                Expand-Archive -Path $src -DestinationPath "$Work\target" -Force -ErrorAction Stop
-                $extracted = $true
-            } catch { Warn "Extraction impossible : $($_.Exception.Message)" }
-        }
-        $count = @(Get-ChildItem "$Work\target" -Recurse -File -ErrorAction SilentlyContinue).Count
-        if ($extracted -and $count -gt 0) {
-            Ok "Archive extraite dans C:\Work\target ($count fichier(s))."
-        } else {
-            Warn "L'extraction n'a rien produit (archive trop grosse ? corrompue ?)."
-            Warn "L'original reste dans C:\BA\in\$TargetName -- extrais-le toi-meme"
-            Warn "(clic droit > Extraire tout) vers C:\Work\target."
-        }
-    }
-    else {
-        New-Item -ItemType Directory -Path "$Work\target" -Force | Out-Null
-        Copy-Item $src "$Work\target\" -Force
-        Ok "Fichier copie dans C:\Work\target"
+            $proc = Start-Process -FilePath $rd.FullName `
+                    -ArgumentList '/install','/quiet','/norestart' -PassThru -ErrorAction Stop
+            if ($proc.WaitForExit(120000)) {          # 2 min max par installeur
+                if ($proc.ExitCode -in 0, 1638, 3010) { Ok "$($rd.Name) : ok (code $($proc.ExitCode))" }
+                else { Warn "$($rd.Name) : code $($proc.ExitCode)" }
+            } else {
+                Warn "$($rd.Name) : trop long (>2 min), on continue sans attendre."
+                try { $proc.Kill() } catch { }
+            }
+        } catch { Warn "$($rd.Name) : $($_.Exception.Message)" }
     }
 }
 
-# --- 4. Marqueur de depart --------------------------------------------------
+# --- 6. Marqueur de session -------------------------------------------------
 [PSCustomObject]@{
     Start      = (Get-Date).ToString('o')
     Target     = $TargetName
     Monitor    = $monitorMode
-    WorkDir    = "$Work\target"
+    WorkDir    = $targetDir
     Stealth    = [bool]$Stealth
     SysmonBin  = $sysmonBin
 } | ConvertTo-Json | Set-Content "$Work\_session.json" -Encoding UTF8
 
-# --- 5. Raccourcis sur le bureau --------------------------------------------
-$desktop = [Environment]::GetFolderPath('Desktop')
-@"
-@echo off
-powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-Report.ps1"
-"@ | Set-Content "$desktop\RAPPORT.cmd" -Encoding ASCII
-
-# Visionneuse de fichiers (la sandbox n'a pas de Notepad)
-@"
-@echo off
-powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-View.ps1"
-"@ | Set-Content "$desktop\VOIR-UN-FICHIER.cmd" -Encoding ASCII
-
-# --- 6. Instructions --------------------------------------------------------
+# --- 7. Instructions --------------------------------------------------------
 Write-Host @"
 
 ================================================================
-  PRET.  Mode de surveillance : $monitorMode
+  PRET.  Surveillance : $monitorMode
 ================================================================
+
+  Tes fichiers sont dans  C:\Work\target  (bruts, tels quels).
 
   ORDRE IMPORTANT -- le rapport n'a de sens qu'APRES avoir joue :
 
-  1) Ouvre  C:\Work\target  et lance l'executable du jeu.
-     (Si le dossier est vide, l'archive d'origine est dans
-      C:\BA\in -- extrais-la a la main dans C:\Work\target.)
+  1) Va dans  C:\Work\target . Decompile le .zip si besoin
+     (clic droit > Extraire tout), puis lance l'executable.
 
-  2) JOUE / UTILISE-LE quelques minutes. Menus, sauvegarde,
-     options. Beaucoup de charges n'agissent qu'apres un delai
-     ou une interaction.
+  2) UTILISE-LE quelques minutes : menus, options, sauvegarde.
+     Beaucoup de charges n'agissent qu'apres une interaction.
 
   3) SEULEMENT ENSUITE, double-clique  RAPPORT.cmd  sur le bureau.
+     (Tu peux jouer plus et relancer RAPPORT.cmd autant de fois
+      que tu veux : l'observation reste active.)
 
-     >> Si tu lances le rapport AVANT le jeu, il te le dira et
-        n'aura rien de vrai a analyser. C'est normal.
+  Lire un fichier (pas de Notepad ici) : VOIR-UN-FICHIER.cmd
 
-     Le rapport sort dans  C:\BA\out\  = ton dossier reports\ sur
-     l'hote. Il survit a la fermeture de la sandbox.
-
-  Pour LIRE un fichier (il n'y a pas de Notepad ici) :
-     double-clique  VOIR-UN-FICHIER.cmd  sur le bureau.
-
+  Le rapport sort dans C:\BA\out\ = ton dossier reports\ sur l'hote.
 ================================================================
-  Rappel : le reseau est $(if ((Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up')) {'ACTIF'} else {'COUPE'}) dans cette sandbox.
+  Reseau : $(if ((Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up')) {'ACTIF'} else {'COUPE'})   |   tout s'efface a la fermeture
 ================================================================
 
 "@ -ForegroundColor White
 
-Set-Location "$Work\target" -ErrorAction SilentlyContinue
+try { Stop-Transcript | Out-Null } catch { }
+Set-Location $targetDir -ErrorAction SilentlyContinue
