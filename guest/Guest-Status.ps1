@@ -47,6 +47,26 @@ if ($vc) {
 $running = Get-Process -Name 'vc_redist*','vcredist*','VC_redist*' -ErrorAction SilentlyContinue
 if ($running) { Row $false "Installation VC++" "EN COURS ($($running.Count) processus)..." }
 
+# --- Windows Defender -------------------------------------------------------
+Write-Host "`n  WINDOWS DEFENDER (dans la sandbox)" -ForegroundColor White
+try {
+    $mp = Get-MpComputerStatus -ErrorAction Stop
+    Row (-not $mp.RealTimeProtectionEnabled) "Protection temps reel" `
+        $(if ($mp.RealTimeProtectionEnabled) { 'ACTIVE -- peut supprimer les .exe/.dll du jeu' } else { 'desactivee (normal ici : la VM est le confinement)' })
+    $det = @(Get-MpThreatDetection -ErrorAction SilentlyContinue)
+    if ($det) {
+        Write-Host "        Fichiers signales/supprimes par Defender :" -ForegroundColor Yellow
+        $det | Sort-Object InitialDetectionTime -Descending | Select-Object -First 8 | ForEach-Object {
+            $res = (@($_.Resources) -join ', ') -replace '^file:_',''
+            Write-Host "          - $res" -ForegroundColor DarkYellow
+        }
+        Write-Host "        (c'est un SIGNAL, pas une preuve : les cracks sont souvent" -ForegroundColor DarkGray
+        Write-Host "         detectes comme 'HackTool' sans etre forcement un virus)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "        (aucune detection enregistree)" -ForegroundColor DarkGray
+    }
+} catch { Write-Host "        (etat Defender indisponible : $($_.Exception.Message))" -ForegroundColor DarkGray }
+
 # --- Surveillance -----------------------------------------------------------
 Write-Host "`n  SURVEILLANCE" -ForegroundColor White
 $svc = Get-Service -Name 'WinHostSvc','Sysmon64','Sysmon' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running'

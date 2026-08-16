@@ -87,6 +87,28 @@ try {
     Ok "Bureau : RAPPORT / EXTRAIRE / VOIR-UN-FICHIER / ETAT"
 } catch { Warn "Creation des raccourcis impossible : $($_.Exception.Message)" }
 
+# --- 2b. Neutraliser Defender DANS la sandbox ------------------------------
+#  Defender (actif dans la sandbox) supprime a l'ecriture les .exe/.dll qu'il
+#  juge suspects -- typiquement les cracks Steam d'un jeu -- ce qui EMPECHE
+#  l'extraction et l'execution, donc l'observation. Or la sandbox EST le
+#  confinement (VM materielle, rien n'atteint l'hote). On neutralise donc
+#  Defender ICI pour laisser le programme tourner et Sysmon voir son VRAI
+#  comportement. L'avis "antivirus" se prend AVANT, au triage sur l'hote.
+Step "Neutralisation de Defender (sandbox jetable seulement)"
+try {
+    Add-MpPreference -ExclusionPath 'C:\Work','C:\g','C:\BA' -ErrorAction SilentlyContinue
+    Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    $rt = (Get-MpComputerStatus -ErrorAction SilentlyContinue).RealTimeProtectionEnabled
+    if ($rt) {
+        Warn "Defender temps reel TOUJOURS actif (protection contre la falsification ?)."
+        Warn "Si l'extraction perd des .exe/.dll : Securite Windows > Protection contre"
+        Warn "les virus > Parametres > desactive 'Protection en temps reel', puis re-extrais."
+    } else {
+        Ok "Defender temps reel desactive : les executables ne seront plus manges."
+    }
+} catch { Warn "Reglage Defender impossible : $($_.Exception.Message)" }
+
 # --- 3. Camouflage (mode furtif) -------------------------------------------
 if ($Stealth) {
     Step "Camouflage du bac a sable (mode furtif)"

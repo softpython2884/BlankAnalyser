@@ -227,6 +227,16 @@ disque virtuel jetable. Tes clés SSH et ton profil navigateur ne sont pas mont�
 
 Autrement dit : l'isolation est une garantie, la détection est un indice.
 
+**Windows Defender dans la sandbox.** Defender est actif par défaut dans la
+sandbox et **supprime à l'écriture les `.exe`/`.dll` qu'il juge suspects** — très
+courant avec les cracks Steam d'un jeu (`steam_api.dll`, etc.). Résultat :
+l'extraction perd des fichiers et le jeu ne peut pas tourner. Comme **la VM est le
+confinement** (rien n'atteint l'hôte), le bootstrap **neutralise Defender à
+l'intérieur** de la sandbox pour laisser le programme s'exécuter et Sysmon
+observer son vrai comportement. L'avis « antivirus » se prend donc **avant**, au
+[triage sur l'hôte](#utilisation-en-ligne-de-commande) ; à l'intérieur, on
+observe. `ETAT.cmd` montre ce que Defender avait éventuellement signalé.
+
 **Ce qui ne marchera pas dans la sandbox :**
 
 - Jeux avec anti-triche noyau (EAC, BattlEye) — refusent de tourner en VM
