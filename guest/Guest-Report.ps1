@@ -12,7 +12,10 @@ param(
     [switch]$KeepRunning,
     # Surchargeables pour tester le generateur hors sandbox
     [string]$WorkRoot = 'C:\Work',
-    [string]$OutRoot  = 'C:\BA\out'
+    [string]$OutRoot  = 'C:\BA\out',
+    # Crochets de test uniquement : injecter des evenements deja construits
+    [object[]]$TestEvents,
+    [string]$TestMode
 )
 
 $ErrorActionPreference = 'Continue'
@@ -32,21 +35,26 @@ Write-Host "`n[..] Collecte des evenements depuis $start ..." -ForegroundColor C
 $ev = @()
 $mode = 'aucun'
 
-try {
-    $raw = Get-WinEvent -FilterHashtable @{
-        LogName = 'Microsoft-Windows-Sysmon/Operational'; StartTime = $start
-    } -ErrorAction Stop
-    $mode = 'sysmon'
-    foreach ($e in $raw) {
-        $d = @{}
-        try { ([xml]$e.ToXml()).Event.EventData.Data | ForEach-Object { $d[$_.Name] = $_.'#text' } } catch { }
-        $ev += [PSCustomObject]@{ Id = $e.Id; Time = $e.TimeCreated; D = $d }
-    }
-} catch {
-    if (Test-Path "$Work\_fallback.jsonl") {
-        $mode = 'fallback'
-        $ev = @(Get-Content "$Work\_fallback.jsonl" | Where-Object { $_ -match '^\{' } |
-                ForEach-Object { try { $_ | ConvertFrom-Json } catch { } })
+if ($TestEvents) {
+    $ev = @($TestEvents); $mode = $TestMode
+}
+else {
+    try {
+        $raw = Get-WinEvent -FilterHashtable @{
+            LogName = 'Microsoft-Windows-Sysmon/Operational'; StartTime = $start
+        } -ErrorAction Stop
+        $mode = 'sysmon'
+        foreach ($e in $raw) {
+            $d = @{}
+            try { ([xml]$e.ToXml()).Event.EventData.Data | ForEach-Object { $d[$_.Name] = $_.'#text' } } catch { }
+            $ev += [PSCustomObject]@{ Id = $e.Id; Time = $e.TimeCreated; D = $d }
+        }
+    } catch {
+        if (Test-Path "$Work\_fallback.jsonl") {
+            $mode = 'fallback'
+            $ev = @(Get-Content "$Work\_fallback.jsonl" | Where-Object { $_ -match '^\{' } |
+                    ForEach-Object { try { $_ | ConvertFrom-Json } catch { } })
+        }
     }
 }
 
@@ -77,11 +85,39 @@ function Test-Noise([string]$img) {
     return ($img -match '(?i)^[A-Z]:\\Windows\\' -and $img -match $NOISE)
 }
 
+# ---------------------------------------------------------------------------
+#  Filtrage du HARNAIS (nos propres outils)
+#
+#  CRUCIAL : sans ca, le rapport s'accuse lui-meme. Le bootstrap est du
+#  PowerShell lance en "-ExecutionPolicy Bypass", RAPPORT.cmd est du cmd.exe,
+#  l'installation de Sysmon ecrit dans ...\Services\SysmonDrv. Tout ca
+#  ressemble a du malware si on ne l'exclut pas. On identifie nos outils par
+#  leurs chemins, noms de scripts, et le binaire Sysmon (renomme ou non).
+# ---------------------------------------------------------------------------
+$hp = @(
+    'C:\\BA\\kit\\', 'C:\\BA\\out\\', 'C:\\BA\\cache\\', 'C:\\BA\\in\\',
+    'Guest-Bootstrap', 'Guest-Report', 'Guest-Realism', 'Guest-FallbackMonitor',
+    'RAPPORT\.cmd', '-accepteula', 'SysmonDrv', 'BA_Presence', 'BA_FS_', 'BA_Proc',
+    '_session\.json', '_fallback\.jsonl'
+)
+if ($session -and $session.SysmonBin) {
+    $leaf = Split-Path ([string]$session.SysmonBin) -Leaf
+    if ($leaf) { $hp += [regex]::Escape($leaf) }        # ex. WinHostSvc.exe / Sysmon64.exe
+}
+$HARNESS = '(?i)(' + ($hp -join '|') + ')'
+function Test-Harness([string]$s) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return $false }
+    return ($s -match $HARNESS)
+}
+
 # --- Accumulateurs ----------------------------------------------------------
-$R     = New-Object System.Collections.Generic.List[string]   # corps du rapport
+#  NB : la variable du corps NE DOIT PAS s'appeler $R : PowerShell est
+#  insensible a la casse, donc $R et le $r d'une boucle seraient la MEME
+#  variable. C'est ce qui faisait planter le rapport en mode Sysmon reel.
+$Body  = New-Object System.Collections.Generic.List[string]
 $flags = New-Object System.Collections.Generic.List[object]
 function Add-Flag($sev, $title, $detail) { $flags.Add([PSCustomObject]@{ Sev = $sev; Title = $title; Detail = $detail }) | Out-Null }
-function W($t) { $R.Add([string]$t) | Out-Null }
+function W($t) { $Body.Add([string]$t) | Out-Null }
 function N($x) {                          # comptage robuste : null -> 0, objet -> 1, collection -> count
     if ($null -eq $x) { return 0 }        # Where-Object sans match renvoie $null, pas un tableau vide :
     return @($x).Count                    # sans ce garde, @($null).Count vaudrait 1 (faux positif de verdict)
@@ -92,8 +128,26 @@ if ($mode -eq 'sysmon') {
 
     $get = { param($e, $k) if ($e.D.ContainsKey($k)) { $e.D[$k] } else { $null } }
 
+    # Un evenement est ignore s'il vient du bruit systeme OU de notre harnais.
+    function Skip-Sys($e) {
+        $d = $e.D
+        $img  = if ($d.ContainsKey('Image'))       { [string]$d['Image'] }       else { '' }
+        $simg = if ($d.ContainsKey('SourceImage')) { [string]$d['SourceImage'] } else { '' }
+        if ((Test-Noise $img) -or (Test-Noise $simg)) { return $true }
+        $blob = $img + "`n" + $simg
+        foreach ($k in 'CommandLine','ParentCommandLine','ParentImage','TargetObject',
+                       'TargetFilename','Details','ImageLoaded','TargetImage') {
+            if ($d.ContainsKey($k)) { $blob += "`n" + [string]$d[$k] }
+        }
+        return (Test-Harness $blob)
+    }
+
+    # La cible a-t-elle vraiment tourne ? (un processus lance depuis son dossier)
+    $targetRan = [bool]@($ev | Where-Object Id -eq 1 |
+        Where-Object { ([string](& $get $_ 'Image')) -like "$workDir*" }).Count
+
     # --- 1 : processus ------------------------------------------------------
-    $procs = @($ev | Where-Object Id -eq 1 | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $procs = @($ev | Where-Object Id -eq 1 | Where-Object { -not (Skip-Sys $_) })
     W "## Processus lances"
     W ""
     if (-not $procs) { W "_Aucun processus notable en dehors du bruit systeme Windows._" }
@@ -113,7 +167,10 @@ if ($mode -eq 'sysmon') {
                 Add-Flag 'HAUTE' "Binaire systeme detourne (LOLBin) : $(Split-Path $img -Leaf)" `
                     "Ligne de commande : ``$cl``$([char]10)$([char]10)Un jeu n'a normalement aucune raison d'appeler un interpreteur de commandes ou un telechargeur systeme."
             }
-            if ($cl -match '(?i)-enc\s|-e\s+[A-Za-z0-9+/]{40}|encodedcommand|frombase64string|-w\s+hidden|-windowstyle\s+hidden|iex\s|invoke-expression|downloadstring|downloadfile|bypass') {
+            # NB : "bypass" seul n'est PAS ici -- "-ExecutionPolicy Bypass" est
+            # utilise par des tonnes d'installeurs legitimes (et par notre propre
+            # harnais). On ne garde que les signaux forts.
+            if ($cl -match '(?i)-enc\s|-e[nc]*\s+[A-Za-z0-9+/]{40}|encodedcommand|frombase64string|-w\s+hidden|-windowstyle\s+hidden|iex\s|invoke-expression|downloadstring|downloadfile|hidden\s+-enc') {
                 Add-Flag 'CRITIQUE' "Commande obfusquee ou telechargeante" "``$cl``"
             }
         }
@@ -121,8 +178,8 @@ if ($mode -eq 'sysmon') {
     W ""
 
     # --- 22 / 3 : reseau ----------------------------------------------------
-    $dns = @($ev | Where-Object Id -eq 22 | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
-    $net = @($ev | Where-Object Id -eq 3  | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $dns = @($ev | Where-Object Id -eq 22 | Where-Object { -not (Skip-Sys $_) })
+    $net = @($ev | Where-Object Id -eq 3  | Where-Object { -not (Skip-Sys $_) })
     W "## Reseau"
     W ""
     if (-not $dns -and -not $net) { W "_Aucune activite reseau observee._"; W "" }
@@ -155,7 +212,7 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 9 : acces disque brut ----------------------------------------------
-    $raw9 = @($ev | Where-Object Id -eq 9 | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $raw9 = @($ev | Where-Object Id -eq 9 | Where-Object { -not (Skip-Sys $_) })
     if ($raw9) {
         W "## Acces disque brut"
         W ""
@@ -171,12 +228,12 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 11 / 26 : fichiers --------------------------------------------------
-    $created = @($ev | Where-Object Id -eq 11 | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $created = @($ev | Where-Object Id -eq 11 | Where-Object { -not (Skip-Sys $_) })
     $outside = @($created | Where-Object {
         $t = & $get $_ 'TargetFilename'
         $t -and $t -notlike "$workDir*" -and $t -notmatch '(?i)\\Temp\\|\\AppData\\Local\\Temp\\'
     })
-    $deleted = @($ev | Where-Object Id -eq 26 | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $deleted = @($ev | Where-Object Id -eq 26 | Where-Object { -not (Skip-Sys $_) })
 
     W "## Fichiers"
     W ""
@@ -209,16 +266,16 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 12/13/14 : registre -------------------------------------------------
-    $reg = @($ev | Where-Object { $_.Id -in 12,13,14 } | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $reg = @($ev | Where-Object { $_.Id -in 12,13,14 } | Where-Object { -not (Skip-Sys $_) })
     if ($reg) {
         W "## Registre - cles sensibles touchees"
         W ""
         W "| Cle | Valeur | Par |"
         W "|---|---|---|"
-        foreach ($r in ($reg | Select-Object -First 30)) {
-            $det = & $get $r 'Details'
+        foreach ($rev in ($reg | Select-Object -First 30)) {
+            $det = & $get $rev 'Details'
             if ($det -and $det.Length -gt 70) { $det = $det.Substring(0,70) + '...' }
-            W "| ``$(& $get $r 'TargetObject')`` | $det | $(Split-Path (& $get $r 'Image') -Leaf) |"
+            W "| ``$(& $get $rev 'TargetObject')`` | $det | $(Split-Path (& $get $rev 'Image') -Leaf) |"
         }
         W ""
         $persist = @($reg | Where-Object { (& $get $_ 'TargetObject') -match '(?i)\\CurrentVersion\\Run|\\Winlogon|Image File Execution Options|\\Services\\' })
@@ -232,11 +289,11 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 6 / 8 / 10 / 24 / 25 : bas niveau ----------------------------------
-    $drv   = @($ev | Where-Object Id -eq 6)
-    $crt   = @($ev | Where-Object Id -eq 8  | Where-Object { -not (Test-Noise (& $get $_ 'SourceImage')) })
-    $lsass = @($ev | Where-Object { $_.Id -eq 10 -and (& $get $_ 'TargetImage') -match '(?i)lsass\.exe' })
-    $tamp  = @($ev | Where-Object Id -eq 25)
-    $clip  = @($ev | Where-Object Id -eq 24 | Where-Object { -not (Test-Noise (& $get $_ 'Image')) })
+    $drv   = @($ev | Where-Object Id -eq 6  | Where-Object { -not (Skip-Sys $_) })
+    $crt   = @($ev | Where-Object Id -eq 8  | Where-Object { -not (Skip-Sys $_) })
+    $lsass = @($ev | Where-Object { $_.Id -eq 10 -and (& $get $_ 'TargetImage') -match '(?i)lsass\.exe' } | Where-Object { -not (Skip-Sys $_) })
+    $tamp  = @($ev | Where-Object Id -eq 25 | Where-Object { -not (Skip-Sys $_) })
+    $clip  = @($ev | Where-Object Id -eq 24 | Where-Object { -not (Skip-Sys $_) })
 
     if ($drv)   { Add-Flag 'CRITIQUE' "Chargement de driver noyau ($(N $drv))" (($drv | ForEach-Object { '`' + (& $get $_ 'ImageLoaded') + '`' }) -join ', ') }
     if ($crt)   { Add-Flag 'CRITIQUE' "Injection de code dans un autre processus ($(N $crt))" "Source : $(($crt | ForEach-Object { Split-Path (& $get $_ 'SourceImage') -Leaf } | Select-Object -Unique) -join ', ')" }
@@ -263,9 +320,13 @@ else {
     W "> couverts par ce rapport."
     W ""
 
-    $p = @($ev | Where-Object type -eq 'process' | Where-Object { -not (Test-Noise $_.image) })
-    $f = @($ev | Where-Object type -eq 'file')
-    $n = @($ev | Where-Object type -eq 'network')
+    $targetRan = [bool]@($ev | Where-Object type -eq 'process' |
+        Where-Object { ([string]$_.image) -like "$workDir*" }).Count
+
+    $p = @($ev | Where-Object type -eq 'process' |
+        Where-Object { -not (Test-Noise $_.image) -and -not (Test-Harness "$($_.image) $($_.commandline)") })
+    $f = @($ev | Where-Object type -eq 'file'    | Where-Object { -not (Test-Harness ([string]$_.path)) })
+    $n = @($ev | Where-Object type -eq 'network' | Where-Object { -not (Test-Harness "$($_.process) $($_.image)") })
 
     W "## Processus lances"
     W ""
@@ -329,7 +390,12 @@ $crit = N ($flagList | Where-Object Sev -eq 'CRITIQUE')
 $high = N ($flagList | Where-Object Sev -eq 'HAUTE')
 $med  = N ($flagList | Where-Object Sev -eq 'MOYENNE')
 
-$verdict = if ($crit -gt 0)            { "NE PAS EXECUTER SUR L'HOTE" }
+if ($null -eq $targetRan) { $targetRan = $true }   # securite
+
+$verdict = if (-not $targetRan -and $crit -eq 0 -and $high -eq 0) {
+                                        "CIBLE JAMAIS LANCEE - rien a analyser"
+           }
+           elseif ($crit -gt 0)       { "NE PAS EXECUTER SUR L'HOTE" }
            elseif ($high -gt 0)        { "SUSPECT - a examiner avant tout usage hors sandbox" }
            elseif ($flagList.Count -gt 0) { "RIEN DE DISQUALIFIANT, quelques points a verifier" }
            else                        { "AUCUN COMPORTEMENT SUSPECT OBSERVE" }
@@ -351,6 +417,13 @@ $head.Add("> ## VERDICT : $verdict")
 $head.Add(">")
 $head.Add("> $crit critique(s), $high haute(s), $med moyenne(s).")
 $head.Add("")
+if (-not $targetRan) {
+    $head.Add("> [!] **Aucun processus n'a ete lance depuis le dossier du jeu**")
+    $head.Add("> (``$workDir``). Tu as tres probablement genere ce rapport **avant**")
+    $head.Add("> de lancer le jeu. Les evenements ci-dessous ne sont donc PAS le jeu :")
+    $head.Add("> lance-le, utilise-le quelques minutes, PUIS relance RAPPORT.cmd.")
+    $head.Add("")
+}
 
 if ($flagList.Count) {
     $head.Add("## Points releves")
@@ -388,7 +461,7 @@ $footer = @(
     "n'ont jamais ete accessibles."
 )
 
-$final = @($head) + @($R) + @($footer)
+$final = @($head) + @($Body) + @($footer)
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $safe  = ($target -replace '[^\w\.-]','_')
@@ -409,6 +482,12 @@ foreach ($fl in $flagList) {
 }
 if (-not $flagList.Count) { Write-Host "  Rien a signaler dans ce qui a ete observe." -ForegroundColor Green }
 Write-Host ""
+if (-not $targetRan) {
+    Write-Host "  [!] La cible n'a JAMAIS ete lancee depuis son dossier." -ForegroundColor Yellow
+    Write-Host "      Tu as sans doute lance ce rapport AVANT le jeu." -ForegroundColor Yellow
+    Write-Host "      -> Lance le jeu, utilise-le, PUIS relance RAPPORT.cmd." -ForegroundColor Yellow
+    Write-Host ""
+}
 Write-Host "  Rapport complet -> $file" -ForegroundColor Cyan
 Write-Host "  (= dossier reports\ sur ton PC, il survit a la fermeture de la sandbox)" -ForegroundColor Gray
 Write-Host ""

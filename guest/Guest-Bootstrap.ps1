@@ -120,8 +120,26 @@ if (-not (Test-Path $src)) {
         Ok "Dossier copie dans C:\Work\target"
     }
     elseif ($item.Extension -eq '.zip') {
-        Expand-Archive -Path $src -DestinationPath "$Work\target" -Force
-        Ok "Archive extraite dans C:\Work\target"
+        # .NET d'abord (rapide, econome en RAM), repli sur Expand-Archive.
+        $extracted = $false
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($src, "$Work\target")
+            $extracted = $true
+        } catch {
+            try {
+                Expand-Archive -Path $src -DestinationPath "$Work\target" -Force -ErrorAction Stop
+                $extracted = $true
+            } catch { Warn "Extraction impossible : $($_.Exception.Message)" }
+        }
+        $count = @(Get-ChildItem "$Work\target" -Recurse -File -ErrorAction SilentlyContinue).Count
+        if ($extracted -and $count -gt 0) {
+            Ok "Archive extraite dans C:\Work\target ($count fichier(s))."
+        } else {
+            Warn "L'extraction n'a rien produit (archive trop grosse ? corrompue ?)."
+            Warn "L'original reste dans C:\BA\in\$TargetName -- extrais-le toi-meme"
+            Warn "(clic droit > Extraire tout) vers C:\Work\target."
+        }
     }
     else {
         New-Item -ItemType Directory -Path "$Work\target" -Force | Out-Null
@@ -154,20 +172,23 @@ Write-Host @"
   PRET.  Mode de surveillance : $monitorMode
 ================================================================
 
+  ORDRE IMPORTANT -- le rapport n'a de sens qu'APRES avoir joue :
+
   1) Ouvre  C:\Work\target  et lance l'executable du jeu.
+     (Si le dossier est vide, l'archive d'origine est dans
+      C:\BA\in -- extrais-la a la main dans C:\Work\target.)
 
-  2) JOUE / UTILISE-LE quelques minutes. Fais ce que tu ferais
-     normalement : menus, sauvegarde, options. Beaucoup de malwares
-     n'agissent qu'apres un delai ou une interaction.
+  2) JOUE / UTILISE-LE quelques minutes. Menus, sauvegarde,
+     options. Beaucoup de charges n'agissent qu'apres un delai
+     ou une interaction.
 
-  3) Ferme le programme, puis double-clique  RAPPORT.cmd  sur le
-     bureau (ou tape la commande ci-dessous).
+  3) SEULEMENT ENSUITE, double-clique  RAPPORT.cmd  sur le bureau.
+
+     >> Si tu lances le rapport AVANT le jeu, il te le dira et
+        n'aura rien de vrai a analyser. C'est normal.
 
      Le rapport sort dans  C:\BA\out\  = ton dossier reports\ sur
      l'hote. Il survit a la fermeture de la sandbox.
-
-  Commande manuelle du rapport :
-     powershell -File $Kit\Guest-Report.ps1
 
 ================================================================
   Rappel : le reseau est $(if ((Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up')) {'ACTIF'} else {'COUPE'}) dans cette sandbox.
