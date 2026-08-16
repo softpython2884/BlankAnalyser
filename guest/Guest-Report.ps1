@@ -210,8 +210,16 @@ if ($mode -eq 'sysmon') {
                     "Ligne de commande : ``$cl``$([char]10)$([char]10)Suppression de sauvegardes / effacement de volume : signature de rancongiciel ou de wiper. Un jeu ne fait jamais ca."
             }
             elseif ($img -match $LOLBIN) {
-                Add-Flag 'HAUTE' "Binaire systeme detourne (LOLBin) : $(Split-Path $img -Leaf)" `
-                    "Ligne de commande : ``$cl``$([char]10)$([char]10)Un jeu n'a normalement aucune raison d'appeler un interpreteur de commandes ou un telechargeur systeme."
+                $leaf = Split-Path $img -Leaf
+                # msiexec /i d'un .msi LOCAL = installeur classique (ex. un jeu
+                # qui installe son launcher). On ne crie que si ca sent l'abus.
+                if ($leaf -match '(?i)^msiexec' -and $cl -match '(?i)\.msi' -and $cl -notmatch '(?i)http|\\Temp\\|\\Downloads\\|/y\b|/z\b') {
+                    Add-Flag 'MOYENNE' "Installation via msiexec (souvent legitime)" `
+                        "``$cl``$([char]10)$([char]10)Un installeur .msi local est normal (un jeu installe son launcher). A surveiller seulement si la cible est inattendue."
+                } else {
+                    Add-Flag 'HAUTE' "Binaire systeme detourne (LOLBin) : $leaf" `
+                        "Ligne de commande : ``$cl``$([char]10)$([char]10)Un jeu n'a normalement aucune raison d'appeler un interpreteur de commandes ou un telechargeur systeme."
+                }
             }
             # NB : "bypass" seul n'est PAS ici -- "-ExecutionPolicy Bypass" est
             # utilise par des tonnes d'installeurs legitimes (et par notre propre
@@ -312,7 +320,12 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 12/13/14 : registre -------------------------------------------------
-    $reg = @($ev | Where-Object { $_.Id -in 12,13,14 } | Where-Object { InTree $_ })
+    # Bruit Windows-interne que TOUT programme touche (config reseau, BAM qui
+    # note l'heure de lancement des exe, cache DNS...) : a exclure, sinon faux
+    # positifs de "persistance" sur \Services\Tcpip\Parameters, \Services\bam\...
+    $REG_NOISE = '(?i)\\Services\\(bam|Tcpip6?|Dnscache|Dhcp|NlaSvc|nsi|W32Time|LanmanWorkstation|iphlpsvc|WinHttpAutoProxySvc|NetBT)\\|\\bam\\State\\|\\Windows Search\\|\\CurrentVersion\\Notifications\\'
+    $reg = @($ev | Where-Object { $_.Id -in 12,13,14 } | Where-Object { InTree $_ } |
+             Where-Object { ([string](& $get $_ 'TargetObject')) -notmatch $REG_NOISE })
     if ($reg) {
         W "## Registre - cles sensibles touchees"
         W ""
@@ -324,7 +337,9 @@ if ($mode -eq 'sysmon') {
             W "| ``$(& $get $rev 'TargetObject')`` | $det | $(Split-Path (& $get $rev 'Image') -Leaf) |"
         }
         W ""
-        $persist = @($reg | Where-Object { (& $get $_ 'TargetObject') -match '(?i)\\CurrentVersion\\Run|\\Winlogon|Image File Execution Options|\\Services\\' })
+        # Vraies clES d'autostart uniquement (pas tout \Services\ : ca attrape
+        # Tcpip\Parameters, bam..., qui ne sont PAS de la persistance).
+        $persist = @($reg | Where-Object { (& $get $_ 'TargetObject') -match '(?i)\\CurrentVersion\\Run(Once)?(\\|$)|\\Winlogon\\(Shell|Userinit|Notify)|Image File Execution Options\\[^\\]+\\Debugger|\\Services\\[^\\]+\\ImagePath|\\Policies\\Explorer\\Run|\\Explorer\\Shell Folders\\(Startup|Common Startup)' })
         if ($persist) {
             Add-Flag 'CRITIQUE' "Persistance installee dans le registre" `
                 "Le programme s'inscrit pour redemarrer automatiquement : $(($persist | Select-Object -First 4 | ForEach-Object { '`' + (& $get $_ 'TargetObject') + '`' }) -join ', ')"
@@ -345,7 +360,7 @@ if ($mode -eq 'sysmon') {
     $clip  = @($ev | Where-Object Id -eq 24 | Where-Object { InTree $_ })
 
     if ($drv)   { Add-Flag 'CRITIQUE' "Chargement de driver noyau ($(N $drv))" (($drv | ForEach-Object { '`' + (& $get $_ 'ImageLoaded') + '`' }) -join ', ') }
-    if ($crt)   { Add-Flag 'CRITIQUE' "Injection de code dans un autre processus ($(N $crt))" "Source : $(($crt | ForEach-Object { Split-Path (& $get $_ 'SourceImage') -Leaf } | Select-Object -Unique) -join ', ')" }
+    if ($crt)   { Add-Flag 'CRITIQUE' "Injection de code dans un autre processus ($(N $crt))" "Source : $(($crt | ForEach-Object { Split-Path (& $get $_ 'SourceImage') -Leaf } | Select-Object -Unique) -join ', ').$([char]10)$([char]10)Technique aussi utilisee par les overlays (Steam/Discord), les DRM et les emulateurs Steam des jeux craques. Reste une vraie raison de ne PAS lancer ce programme hors du bac a sable." }
     if ($lsass) { Add-Flag 'CRITIQUE' "Acces a lsass.exe ($(N $lsass))" "Signature du vol d'identifiants Windows." }
     if ($tamp)  { Add-Flag 'CRITIQUE' "Process hollowing / tampering ($(N $tamp))" "Le programme remplace le code d'un processus legitime pour s'y cacher." }
     if ($clip)  { Add-Flag 'HAUTE' "Lecture du presse-papier ($(N $clip))" "Technique du 'clipper' : remplace une adresse de portefeuille copiee. A rapprocher de l'usage reel du jeu." }
