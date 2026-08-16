@@ -142,12 +142,48 @@ if ($mode -eq 'sysmon') {
         return (Test-Harness $blob)
     }
 
-    # La cible a-t-elle vraiment tourne ? (un processus lance depuis son dossier)
-    $targetRan = [bool]@($ev | Where-Object Id -eq 1 |
-        Where-Object { ([string](& $get $_ 'Image')) -like "$workDir*" }).Count
+    # -----------------------------------------------------------------------
+    #  ATTRIBUTION A LA CIBLE  (le coeur de la fiabilite du rapport)
+    #
+    #  Une Sandbox fraiche genere des CENTAINES d'evenements de demarrage
+    #  Windows sans aucun rapport avec le jeu. Tenter de tous les lister comme
+    #  "bruit" est une bataille perdue -- il en restera toujours un qui passe
+    #  et devient un faux "CRITIQUE". A la place, on ne garde QUE l'arbre de
+    #  processus du jeu : les processus lances depuis son dossier + toute leur
+    #  descendance, identifies par le ProcessGuid unique de Sysmon. Tout le
+    #  reste (OS, harnais) tombe de lui-meme.
+    # -----------------------------------------------------------------------
+    $proc1 = @($ev | Where-Object Id -eq 1)
+    $targetGuids = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($e in $proc1) {
+        if (([string](& $get $e 'Image')) -like "$workDir*") {
+            [void]$targetGuids.Add([string](& $get $e 'ProcessGuid'))
+        }
+    }
+    $changed = $true
+    while ($changed) {                        # fermeture transitive : les enfants
+        $changed = $false
+        foreach ($e in $proc1) {
+            $pg  = [string](& $get $e 'ProcessGuid')
+            $ppg = [string](& $get $e 'ParentProcessGuid')
+            if ($ppg -and $targetGuids.Contains($ppg) -and -not $targetGuids.Contains($pg)) {
+                [void]$targetGuids.Add($pg); $changed = $true
+            }
+        }
+    }
+    $targetRan = ($targetGuids.Count -gt 0)
+
+    # Un evenement ne "compte" que s'il est attribuable a l'arbre du jeu.
+    function InTree($e) {
+        $pg = [string](& $get $e 'ProcessGuid')
+        if ($pg -and $targetGuids.Contains($pg)) { return $true }
+        $spg = [string](& $get $e 'SourceProcessGuid')   # CreateRemoteThread / ProcessAccess
+        if ($spg -and $targetGuids.Contains($spg)) { return $true }
+        return $false
+    }
 
     # --- 1 : processus ------------------------------------------------------
-    $procs = @($ev | Where-Object Id -eq 1 | Where-Object { -not (Skip-Sys $_) })
+    $procs = @($proc1 | Where-Object { InTree $_ })
     W "## Processus lances"
     W ""
     if (-not $procs) { W "_Aucun processus notable en dehors du bruit systeme Windows._" }
@@ -178,8 +214,8 @@ if ($mode -eq 'sysmon') {
     W ""
 
     # --- 22 / 3 : reseau ----------------------------------------------------
-    $dns = @($ev | Where-Object Id -eq 22 | Where-Object { -not (Skip-Sys $_) })
-    $net = @($ev | Where-Object Id -eq 3  | Where-Object { -not (Skip-Sys $_) })
+    $dns = @($ev | Where-Object Id -eq 22 | Where-Object { InTree $_ })
+    $net = @($ev | Where-Object Id -eq 3  | Where-Object { InTree $_ })
     W "## Reseau"
     W ""
     if (-not $dns -and -not $net) { W "_Aucune activite reseau observee._"; W "" }
@@ -212,7 +248,7 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 9 : acces disque brut ----------------------------------------------
-    $raw9 = @($ev | Where-Object Id -eq 9 | Where-Object { -not (Skip-Sys $_) })
+    $raw9 = @($ev | Where-Object Id -eq 9 | Where-Object { InTree $_ })
     if ($raw9) {
         W "## Acces disque brut"
         W ""
@@ -228,12 +264,12 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 11 / 26 : fichiers --------------------------------------------------
-    $created = @($ev | Where-Object Id -eq 11 | Where-Object { -not (Skip-Sys $_) })
+    $created = @($ev | Where-Object Id -eq 11 | Where-Object { InTree $_ })
     $outside = @($created | Where-Object {
         $t = & $get $_ 'TargetFilename'
         $t -and $t -notlike "$workDir*" -and $t -notmatch '(?i)\\Temp\\|\\AppData\\Local\\Temp\\'
     })
-    $deleted = @($ev | Where-Object Id -eq 26 | Where-Object { -not (Skip-Sys $_) })
+    $deleted = @($ev | Where-Object Id -eq 26 | Where-Object { InTree $_ })
 
     W "## Fichiers"
     W ""
@@ -266,7 +302,7 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 12/13/14 : registre -------------------------------------------------
-    $reg = @($ev | Where-Object { $_.Id -in 12,13,14 } | Where-Object { -not (Skip-Sys $_) })
+    $reg = @($ev | Where-Object { $_.Id -in 12,13,14 } | Where-Object { InTree $_ })
     if ($reg) {
         W "## Registre - cles sensibles touchees"
         W ""
@@ -289,11 +325,13 @@ if ($mode -eq 'sysmon') {
     }
 
     # --- 6 / 8 / 10 / 24 / 25 : bas niveau ----------------------------------
+    # Event 6 (DriverLoad) n'a PAS de ProcessGuid : on ne peut pas l'attribuer a
+    # l'arbre du jeu. On se rabat sur l'exclusion du harnais (SysmonDrv).
     $drv   = @($ev | Where-Object Id -eq 6  | Where-Object { -not (Skip-Sys $_) })
-    $crt   = @($ev | Where-Object Id -eq 8  | Where-Object { -not (Skip-Sys $_) })
-    $lsass = @($ev | Where-Object { $_.Id -eq 10 -and (& $get $_ 'TargetImage') -match '(?i)lsass\.exe' } | Where-Object { -not (Skip-Sys $_) })
-    $tamp  = @($ev | Where-Object Id -eq 25 | Where-Object { -not (Skip-Sys $_) })
-    $clip  = @($ev | Where-Object Id -eq 24 | Where-Object { -not (Skip-Sys $_) })
+    $crt   = @($ev | Where-Object Id -eq 8  | Where-Object { InTree $_ })
+    $lsass = @($ev | Where-Object { $_.Id -eq 10 -and (& $get $_ 'TargetImage') -match '(?i)lsass\.exe' } | Where-Object { InTree $_ })
+    $tamp  = @($ev | Where-Object Id -eq 25 | Where-Object { InTree $_ })
+    $clip  = @($ev | Where-Object Id -eq 24 | Where-Object { InTree $_ })
 
     if ($drv)   { Add-Flag 'CRITIQUE' "Chargement de driver noyau ($(N $drv))" (($drv | ForEach-Object { '`' + (& $get $_ 'ImageLoaded') + '`' }) -join ', ') }
     if ($crt)   { Add-Flag 'CRITIQUE' "Injection de code dans un autre processus ($(N $crt))" "Source : $(($crt | ForEach-Object { Split-Path (& $get $_ 'SourceImage') -Leaf } | Select-Object -Unique) -join ', ')" }
@@ -492,9 +530,11 @@ Write-Host "  Rapport complet -> $file" -ForegroundColor Cyan
 Write-Host "  (= dossier reports\ sur ton PC, il survit a la fermeture de la sandbox)" -ForegroundColor Gray
 Write-Host ""
 
-if (-not $KeepRunning) {
-    $bin = if ($session -and $session.SysmonBin -and (Test-Path $session.SysmonBin)) { $session.SysmonBin }
-           elseif (Test-Path "$Work\Sysmon64.exe") { "$Work\Sysmon64.exe" }
-           else { $null }
-    if ($bin) { & $bin -u force 2>&1 | Out-Null }
+# NE PAS desinstaller l'observateur : la sandbox est jetable, tout disparait a
+# la fermeture. Le laisser tourner permet de relancer RAPPORT.cmd autant de fois
+# qu'on veut (jouer plus, re-tester...). Le desinstaller cassait le 2e rapport.
+if ($mode -eq 'sysmon') {
+    Write-Host "  L'observation reste ACTIVE : tu peux jouer encore, puis relancer" -ForegroundColor DarkGray
+    Write-Host "  RAPPORT.cmd pour un rapport a jour. (Tout s'efface a la fermeture.)" -ForegroundColor DarkGray
+    Write-Host ""
 }

@@ -110,17 +110,15 @@ Via le menu : **option 1**. En ligne de commande :
 Active Windows Sandbox (redémarrage requis la première fois) et télécharge
 Sysmon + Procmon (~10 Mo, une seule fois pour toujours).
 
-Ensuite, dépose une fois pour toutes tes runtimes dans `cache\redist\` :
+Setup télécharge **automatiquement** les runtimes Visual C++ x64/x86
+(`vc_redist`, ~40 Mo, une seule fois) dans `cache\redist\` — c'est la réponse au
+fameux **`VCRUNTIME140.dll introuvable`**. Pour un jeu .NET, ajoute aussi à la
+main `dotnet-runtime-*.exe` (https://dotnet.microsoft.com/download) dans ce
+dossier.
 
-| Fichier | URL | Taille |
-|---|---|---|
-| `vc_redist.x64.exe` | https://aka.ms/vs/17/release/vc_redist.x64.exe | ~25 Mo |
-| `vc_redist.x86.exe` | https://aka.ms/vs/17/release/vc_redist.x86.exe | ~14 Mo |
-| `dotnet-runtime-*.exe` | https://dotnet.microsoft.com/download | si jeu .NET |
-
-**C'est ça qui règle le problème « faut tout réinstaller à chaque fois ».** Ils
-sont réinstallés automatiquement dans chaque sandbox, depuis le disque local,
-sans jamais retoucher à ta connexion.
+**C'est ça qui règle le problème « faut tout réinstaller à chaque fois ».** Ces
+`.exe` sont réinstallés automatiquement (`/quiet /norestart`) dans chaque
+sandbox, depuis le disque local, sans jamais retoucher à ta connexion.
 
 ---
 
@@ -172,6 +170,13 @@ Au lieu des 400 000 lignes de Procmon, une page :
 Sysmon plutôt que Procmon parce que Sysmon produit des événements *structurés et
 déjà filtrés au niveau du noyau* : quelques centaines d'événements utiles là où
 Procmon en produit des centaines de milliers indifférenciés.
+
+**Le rapport n'analyse que l'arbre de processus du jeu** — le programme lancé
+depuis son dossier et toute sa descendance, identifiés par leur `ProcessGuid`
+Sysmon. Le bruit de démarrage de Windows et les outils de BlankAnalyser
+lui-même en sont exclus automatiquement : pas de faux « CRITIQUE » venant de
+l'OS ou du harnais. Corollaire : **il faut que le jeu ait vraiment tourné** — si
+tu génères le rapport avant de le lancer, il te le dit et n'a rien à analyser.
 
 ---
 
@@ -265,6 +270,7 @@ Par ordre de solidité décroissante :
 | `guest/Guest-Report.ps1` | génère le rapport lisible |
 | `guest/Guest-FallbackMonitor.ps1` | moniteur sans driver, si Sysmon échoue |
 | `guest/Guest-Realism.ps1` | couche de camouflage du mode furtif |
+| `guest/Guest-View.ps1` | visionneuse de fichiers (la sandbox n'a pas de Notepad) |
 | `guest/sysmon-blankanalyser.xml` | config Sysmon (capture large, filtrage à la lecture) |
 | `docs/ANTI-VM.md` | ce que le mode furtif masque et ce qu'il ne masquera jamais |
 | `SECURITY.md` | garanties, limites, signalement de faille |

@@ -158,12 +158,18 @@ if (-not (Test-Path $src)) {
     SysmonBin  = $sysmonBin
 } | ConvertTo-Json | Set-Content "$Work\_session.json" -Encoding UTF8
 
-# --- 5. Raccourci rapport sur le bureau -------------------------------------
+# --- 5. Raccourcis sur le bureau --------------------------------------------
 $desktop = [Environment]::GetFolderPath('Desktop')
 @"
 @echo off
 powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-Report.ps1"
 "@ | Set-Content "$desktop\RAPPORT.cmd" -Encoding ASCII
+
+# Visionneuse de fichiers (la sandbox n'a pas de Notepad)
+@"
+@echo off
+powershell.exe -ExecutionPolicy Bypass -NoExit -File "$Kit\Guest-View.ps1"
+"@ | Set-Content "$desktop\VOIR-UN-FICHIER.cmd" -Encoding ASCII
 
 # --- 6. Instructions --------------------------------------------------------
 Write-Host @"
@@ -189,6 +195,9 @@ Write-Host @"
 
      Le rapport sort dans  C:\BA\out\  = ton dossier reports\ sur
      l'hote. Il survit a la fermeture de la sandbox.
+
+  Pour LIRE un fichier (il n'y a pas de Notepad ici) :
+     double-clique  VOIR-UN-FICHIER.cmd  sur le bureau.
 
 ================================================================
   Rappel : le reseau est $(if ((Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up')) {'ACTIF'} else {'COUPE'}) dans cette sandbox.

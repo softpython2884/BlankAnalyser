@@ -5,11 +5,13 @@
     - Active la fonctionnalite Windows Sandbox (Containers-DisposableClientVM)
     - Cree l'arborescence de travail
     - Telecharge Sysmon + Procmon (~10 Mo au total, une seule fois)
+    - Telecharge les runtimes Visual C++ x64/x86 (~40 Mo, une seule fois)
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipDownload,
-    [switch]$SkipFeature
+    [switch]$SkipFeature,
+    [switch]$SkipRedist    # ne pas telecharger les runtimes Visual C++ (~40 Mo)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,22 +73,39 @@ if (-not $SkipDownload) {
     }
 }
 
-# --- 4. Rappel redistribuables ---------------------------------------------
+# --- 4. Redistribuables Visual C++ (indispensables a la plupart des jeux) ---
+#  C'est LA reponse au "VCRUNTIME140.dll introuvable". Telecharge une seule
+#  fois ici, puis installe automatiquement dans chaque sandbox depuis le cache.
 $redistDir = Join-Path $Root 'cache\redist'
-$redistCount = @(Get-ChildItem $redistDir -File -ErrorAction SilentlyContinue).Count
-Say "`n--- Cache de dependances : $redistCount fichier(s) dans cache\redist\ ---" Cyan
-if ($redistCount -eq 0) {
-    Say @"
-  Depose ici, UNE FOIS, les runtimes dont tes jeux ont besoin. Ils seront
-  installes automatiquement dans chaque sandbox, sans retelecharger :
+if (-not (Test-Path $redistDir)) { New-Item -ItemType Directory -Path $redistDir -Force | Out-Null }
 
-    vc_redist.x64.exe    https://aka.ms/vs/17/release/vc_redist.x64.exe   (~25 Mo)
-    vc_redist.x86.exe    https://aka.ms/vs/17/release/vc_redist.x86.exe   (~14 Mo)
-    dxwebsetup.exe       DirectX End-User Runtime Web Installer           (~300 Ko, mais telecharge en ligne)
-    dotnet-runtime-*.exe https://dotnet.microsoft.com/download            (si jeu .NET)
-
-  Les .exe sont reconnus automatiquement (installes en /quiet /norestart).
-"@ White
+if (-not $SkipRedist -and -not $SkipDownload) {
+    Say "`n--- Runtimes Visual C++ (une seule fois, ~40 Mo) ---" Cyan
+    $redists = @(
+        @{ Name = 'vc_redist.x64.exe'; Url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'; Size = '~25 Mo' }
+        @{ Name = 'vc_redist.x86.exe'; Url = 'https://aka.ms/vs/17/release/vc_redist.x86.exe'; Size = '~14 Mo' }
+    )
+    foreach ($r in $redists) {
+        $dest = Join-Path $redistDir $r.Name
+        if (Test-Path $dest) { Say "[ok] $($r.Name) deja present." Green; continue }
+        Say "[..] Telechargement $($r.Name) ($($r.Size))..." Gray
+        try {
+            $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $r.Url -OutFile $dest -UseBasicParsing
+            $ProgressPreference = $old
+            Say "[ok] $($r.Name) -> cache\redist\ ($([math]::Round((Get-Item $dest).Length/1MB,1)) Mo)" Green
+        } catch {
+            Say "[!] Echec $($r.Name) : $($_.Exception.Message)" Yellow
+            Say "    A recuperer a la main : $($r.Url)" Yellow
+        }
+    }
 }
+
+$redistCount = @(Get-ChildItem $redistDir -File -Filter *.exe -ErrorAction SilentlyContinue).Count
+Say "`n--- Cache de dependances : $redistCount runtime(s) dans cache\redist\ ---" Cyan
+Say @"
+  Ces .exe sont installes automatiquement (/quiet /norestart) dans chaque
+  sandbox. Pour un jeu .NET, ajoute aussi dotnet-runtime-*.exe ici.
+"@ White
 
 Say "`n=== Termine. Etape suivante : .\Triage-Host.ps1 -Target <ton fichier> ===`n" Cyan
